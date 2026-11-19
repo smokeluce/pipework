@@ -45,7 +45,7 @@ public class MainWindow : Window
     readonly TextBox search = new() { Text = "en_US" };
     readonly TextBox input = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = 15, Padding = new Thickness(12), CornerRadius = new CornerRadius(10) };
     readonly ListBox list = new() { Background = Brushes.Transparent };
-    readonly TextBlock count = new() { Foreground = Brush.Parse("#8B93A1"), FontSize = 12 };
+    readonly TextBlock count = new() { Foreground = Brush.Parse("#8B93A1"), FontSize = 12, TextWrapping = TextWrapping.Wrap };
     readonly TextBlock status = new() { Foreground = Brush.Parse("#8B93A1"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) };
     readonly Slider speed = new() { Minimum = 0.5, Maximum = 2.0, Value = 1.0, Width = 170, VerticalAlignment = VerticalAlignment.Center };
     readonly TextBlock speedLabel = new() { Text = "Speed 1.00x", Foreground = Brush.Parse("#8B93A1"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 6), Width = 92 };
@@ -128,7 +128,7 @@ public class MainWindow : Window
         DockPanel.SetDock(bottom, Dock.Bottom);
         right.Children.Add(title); right.Children.Add(bottom); right.Children.Add(input);
 
-        var root = new Grid { ColumnDefinitions = new ColumnDefinitions("340,*"), Margin = new Thickness(16) };
+        var root = new Grid { ColumnDefinitions = new ColumnDefinitions("360,*"), Margin = new Thickness(16) };
         var lc = Card(left); var rc = Card(right);
         rc.Margin = new Thickness(16, 0, 0, 0);
         Grid.SetColumn(rc, 1);
@@ -174,9 +174,9 @@ public class MainWindow : Window
         var terms = (search.Text ?? "").ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var sel = Selected?.Key;
         shown = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
-        list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "○  ") + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
+        list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "↓  ") + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
         list.SelectedIndex = sel == null ? -1 : shown.FindIndex(v => v.Key == sel);
-        count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed";
+        count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed  ·  ↓ = download";
     }
 
     async Task LoadVoices()
