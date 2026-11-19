@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -8,8 +9,10 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Styling;
 
 namespace Pipework.Views;
@@ -27,12 +30,13 @@ public class VoiceInfo
 
 public class MainWindow : Window
 {
+    const string AppVersion = "0.1";
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(30) };
-    static readonly string Root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library/Application Support/Pipework");
-    static readonly string VoiceDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local/share/piper-voices");
-    static readonly string PiperDir = Path.Combine(Root, "piper");
-    static readonly string PiperBin = "/Users/paulswonger/Library/Python/3.9/bin/piper";
-    const string PiperUrl = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x64.tar.gz";
+    static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    static readonly string Root = Path.Combine(Home, "Library/Application Support/Pipework");
+    static readonly string VoiceDir = Path.Combine(Home, ".local/share/piper-voices");
+    // TODO(settings): samples cache screen with size display and a clear button
+    static readonly string SampleDir = Path.Combine(Root, "samples");
     const string VoicesBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
     const string SampleText = "Hello, this is a sample of this voice. The quick brown fox jumps over the lazy dog.";
 
@@ -42,35 +46,57 @@ public class MainWindow : Window
     readonly TextBox input = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontSize = 15, Padding = new Thickness(12), CornerRadius = new CornerRadius(10) };
     readonly ListBox list = new() { Background = Brushes.Transparent };
     readonly TextBlock count = new() { Foreground = Brush.Parse("#8B93A1"), FontSize = 12 };
-    readonly TextBlock status = new() { Foreground = Brush.Parse("#8B93A1"), TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+    readonly TextBlock status = new() { Foreground = Brush.Parse("#8B93A1"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0) };
+    readonly Slider speed = new() { Minimum = 0.5, Maximum = 2.0, Value = 1.0, Width = 170, VerticalAlignment = VerticalAlignment.Center };
+    readonly TextBlock speedLabel = new() { Text = "Speed 1.00x", Foreground = Brush.Parse("#8B93A1"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 6), Width = 92 };
+    readonly Button pauseBtn;
     Process? piperProc, player;
-    bool busy, stopRequested;
+    string? piperPath, lastRaw, lastLabel;
+    bool busy, stopRequested, paused;
 
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
+    double Rate => Math.Round(speed.Value * 20) / 20;
 
     public MainWindow()
     {
         Title = "Pipework";
-        Width = 1000; Height = 700; MinWidth = 760; MinHeight = 520;
+        Width = 1060; Height = 720; MinWidth = 900; MinHeight = 560;
         Background = Brush.Parse("#121418");
+        try { Icon = new WindowIcon(Avalonia.Platform.AssetLoader.Open(new Uri("avares://Pipework/Assets/pipework-icon.png"))); } catch { }
         if (Application.Current != null) Application.Current.RequestedThemeVariant = ThemeVariant.Dark;
 
         var dl = Btn("Download voice", "#2D6CDF");
         var sample = Btn("Sample", "#2A2F3A");
         var speak = Btn("Speak", "#2D6CDF");
+        pauseBtn = Btn("Pause", "#2A2F3A");
         var stop = Btn("Stop", "#3A2A2E");
+        var replay = Btn("↻ Replay", "#2A2F3A");
+        var saveWav = Btn("Save WAV…", "#2A2F3A");
+        var saveTxt = Btn("Save text…", "#2A2F3A");
+
         dl.Click += async (_, _) => await Run(async () => { var v = Selected; if (v == null) { SetStatus("Pick a voice first"); return; } await DownloadVoice(v); SetStatus("Downloaded " + v.Key); });
-        sample.Click += async (_, _) => await Run(async () => { var v = Selected; if (v == null) { SetStatus("Pick a voice first"); return; } await Speak(SampleText, v); });
+        sample.Click += async (_, _) => await Run(async () => { var v = Selected; if (v == null) { SetStatus("Pick a voice first"); return; } await SpeakAndPlay(SampleText, v, true); });
         speak.Click += async (_, _) => await Run(async () =>
         {
             var v = Selected;
             if (v == null) { SetStatus("Pick a voice first"); return; }
             if (string.IsNullOrWhiteSpace(input.Text)) { SetStatus("Paste some text first"); return; }
-            await Speak(input.Text!, v);
+            await SpeakAndPlay(input.Text!, v, false);
         });
+        pauseBtn.Click += (_, _) => TogglePause();
         stop.Click += (_, _) => { stopRequested = true; Kill(piperProc); Kill(player); };
+        replay.Click += async (_, _) => await Run(async () =>
+        {
+            if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Nothing to replay yet"); return; }
+            stopRequested = false;
+            await Play(lastRaw, lastLabel ?? "");
+        });
+        saveWav.Click += async (_, _) => await Guard(SaveWav);
+        saveTxt.Click += async (_, _) => await Guard(SaveText);
 
         search.PropertyChanged += (_, e) => { if (e.Property == TextBox.TextProperty) RefreshList(); };
+        speed.PropertyChanged += (_, e) => { if (e.Property == RangeBase.ValueProperty) speedLabel.Text = "Speed " + Rate.ToString("0.00", CultureInfo.InvariantCulture) + "x"; };
+        speedLabel.PointerPressed += (_, _) => speed.Value = 1.0;
 
         var left = new DockPanel();
         var head = new StackPanel { Spacing = 8, Margin = new Thickness(0, 0, 0, 10) };
@@ -88,11 +114,19 @@ public class MainWindow : Window
         var title = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
         title.Children.Add(new TextBlock { Text = "Pipework", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
         title.Children.Add(new TextBlock { Text = "Paste text, pick a voice, hit Speak", Foreground = Brush.Parse("#8B93A1"), FontSize = 12 });
+        title.Children.Add(new TextBlock { Text = "v" + AppVersion + "  ·  " + BuildInfo.Text, Foreground = Brush.Parse("#5C6370"), FontSize = 11, Margin = new Thickness(0, 2, 0, 0) });
         DockPanel.SetDock(title, Dock.Top);
-        var bar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
-        bar.Children.Add(speak); bar.Children.Add(stop); bar.Children.Add(status);
-        DockPanel.SetDock(bar, Dock.Bottom);
-        right.Children.Add(title); right.Children.Add(bar); right.Children.Add(input);
+
+        var transport = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
+        transport.Children.Add(speak); transport.Children.Add(pauseBtn); transport.Children.Add(stop); transport.Children.Add(replay);
+        var tools = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
+        tools.Children.Add(speedLabel); tools.Children.Add(speed);
+        var spacer = new Border { Width = 16, Height = 1 };
+        tools.Children.Add(spacer); tools.Children.Add(saveWav); tools.Children.Add(saveTxt);
+        var bottom = new StackPanel();
+        bottom.Children.Add(transport); bottom.Children.Add(tools); bottom.Children.Add(status);
+        DockPanel.SetDock(bottom, Dock.Bottom);
+        right.Children.Add(title); right.Children.Add(bottom); right.Children.Add(input);
 
         var root = new Grid { ColumnDefinitions = new ColumnDefinitions("340,*"), Margin = new Thickness(16) };
         var lc = Card(left); var rc = Card(right);
@@ -110,7 +144,7 @@ public class MainWindow : Window
     {
         Content = text, Background = Brush.Parse(bg), Foreground = Brushes.White,
         CornerRadius = new CornerRadius(8), Padding = new Thickness(18, 9),
-        FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 0, 8, 0)
+        FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 0, 8, 6)
     };
 
     void SetStatus(string s) => status.Text = s;
@@ -121,10 +155,17 @@ public class MainWindow : Window
         busy = true;
         try { await work(); }
         catch (Exception ex) { SetStatus(stopRequested ? "Stopped" : "Error: " + ex.Message); }
-        finally { busy = false; Cursor = Avalonia.Input.Cursor.Default; RefreshList(); }
+        finally { busy = false; RefreshList(); }
+    }
+
+    async Task Guard(Func<Task> work)
+    {
+        try { await work(); }
+        catch (Exception ex) { SetStatus("Error: " + ex.Message); }
     }
 
     static void Kill(Process? p) { try { if (p != null && !p.HasExited) p.Kill(); } catch { } }
+    static void TryDelete(string path) { try { File.Delete(path); } catch { } }
 
     static bool Installed(VoiceInfo v) => v.OnnxName != "" && File.Exists(Path.Combine(VoiceDir, v.OnnxName)) && File.Exists(Path.Combine(VoiceDir, v.OnnxName + ".json"));
 
@@ -135,7 +176,7 @@ public class MainWindow : Window
         shown = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
         list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "○  ") + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
         list.SelectedIndex = sel == null ? -1 : shown.FindIndex(v => v.Key == sel);
-        count.Text = $"{shown.Count} voices  ·  ● = installed";
+        count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed";
     }
 
     async Task LoadVoices()
@@ -195,18 +236,144 @@ public class MainWindow : Window
             await DownloadFile(VoicesBase + f, Path.Combine(VoiceDir, Path.GetFileName(f)), "Downloading " + v.Key);
     }
 
-    async Task EnsurePiper()
+    // Finds the pip-installed piper at runtime: env override, then the login shell's PATH, then common spots.
+    static string? FindPiper()
     {
-        if (File.Exists(PiperBin)) return;
-        Directory.CreateDirectory(Root);
-        var tgz = Path.Combine(Root, "piper.tar.gz");
-        await DownloadFile(PiperUrl, tgz, "Downloading Piper engine");
-        SetStatus("Unpacking Piper…");
-        var tar = Process.Start("tar", new[] { "-xzf", tgz, "-C", Root })!;
-        await tar.WaitForExitAsync();
-        File.Delete(tgz);
-        if (!File.Exists(PiperBin)) throw new Exception("Piper unpack failed");
-        Process.Start("chmod", new[] { "+x", PiperBin })!.WaitForExit();
+        var env = Environment.GetEnvironmentVariable("PIPEWORK_PIPER");
+        if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
+        try
+        {
+            var psi = new ProcessStartInfo("/bin/zsh") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            psi.ArgumentList.Add("-lic"); psi.ArgumentList.Add("command -v piper");
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            p.StandardError.ReadToEndAsync();
+            if (p.WaitForExit(8000))
+            {
+                var hit = outTask.Result.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.EndsWith("piper") && File.Exists(l));
+                if (hit != null) return hit;
+            }
+            else Kill(p);
+        }
+        catch { }
+        var cands = new List<string> { "/opt/homebrew/bin/piper", "/usr/local/bin/piper", Path.Combine(Home, ".local/bin/piper") };
+        var pyRoot = Path.Combine(Home, "Library/Python");
+        if (Directory.Exists(pyRoot)) cands.AddRange(Directory.GetDirectories(pyRoot).Select(d => Path.Combine(d, "bin/piper")));
+        return cands.FirstOrDefault(File.Exists);
+    }
+
+    async Task<string?> Synthesize(string text, VoiceInfo v, bool cache)
+    {
+        stopRequested = false;
+        var raw = cache ? Path.Combine(SampleDir, v.Key + ".wav") : Path.Combine(Path.GetTempPath(), "pipework-" + DateTime.Now.ToString("HHmmssfff") + ".wav");
+        Directory.CreateDirectory(Path.GetDirectoryName(raw)!);
+        if (cache && File.Exists(raw)) return raw;
+
+        piperPath ??= await Task.Run(FindPiper);
+        if (piperPath == null) throw new Exception("piper not found. Install it with: pip3 install piper-tts");
+        if (!Installed(v)) await DownloadVoice(v);
+        if (File.Exists(raw)) File.Delete(raw);
+
+        SetStatus("Synthesizing…");
+        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Wait);
+        try
+        {
+            var psi = new ProcessStartInfo(piperPath)
+            {
+                WorkingDirectory = Root, RedirectStandardInput = true, RedirectStandardError = true, UseShellExecute = false
+            };
+            psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(Path.Combine(VoiceDir, v.OnnxName));
+            psi.ArgumentList.Add("--output_file"); psi.ArgumentList.Add(raw);
+            using var p = Process.Start(psi)!;
+            piperProc = p;
+            var errTask = p.StandardError.ReadToEndAsync();
+            await p.StandardInput.WriteAsync(text);
+            p.StandardInput.Close();
+            await p.WaitForExitAsync();
+            var err = await errTask;
+            piperProc = null;
+            if (stopRequested) { TryDelete(raw); SetStatus("Stopped"); return null; }
+            if (p.ExitCode != 0 || !File.Exists(raw))
+            {
+                TryDelete(raw);
+                throw new Exception(err.Trim().Split('\n').LastOrDefault() ?? "piper failed");
+            }
+        }
+        finally { Cursor = Avalonia.Input.Cursor.Default; }
+        return raw;
+    }
+
+    async Task SpeakAndPlay(string text, VoiceInfo v, bool cache)
+    {
+        var raw = await Synthesize(text, v, cache);
+        if (raw == null) return;
+        var prev = lastRaw;
+        lastRaw = raw; lastLabel = v.Key;
+        if (prev != null && prev != raw && prev.StartsWith(Path.GetTempPath())) TryDelete(prev);
+        await Play(raw, v.Key);
+    }
+
+    async Task Play(string raw, string label)
+    {
+        var play = Path.Combine(Path.GetTempPath(), "pipework-play.wav");
+        File.Copy(raw, play, true);
+        PadWav(play);
+        var psi = new ProcessStartInfo("afplay") { UseShellExecute = false };
+        var rate = Rate;
+        if (Math.Abs(rate - 1.0) > 0.001)
+        {
+            psi.ArgumentList.Add("-r"); psi.ArgumentList.Add(rate.ToString("0.00", CultureInfo.InvariantCulture));
+            psi.ArgumentList.Add("-q"); psi.ArgumentList.Add("1");
+        }
+        psi.ArgumentList.Add(play);
+        SetStatus("Speaking with " + label + (Math.Abs(rate - 1.0) > 0.001 ? " at " + rate.ToString("0.00", CultureInfo.InvariantCulture) + "x" : ""));
+        paused = false; pauseBtn.Content = "Pause";
+        using var pl = Process.Start(psi)!;
+        player = pl;
+        try { await pl.WaitForExitAsync(); }
+        finally { player = null; paused = false; pauseBtn.Content = "Pause"; }
+        SetStatus(stopRequested ? "Stopped" : "Done");
+    }
+
+    void TogglePause()
+    {
+        var p = player;
+        if (p == null) return;
+        try
+        {
+            Process.Start("/bin/kill", new[] { paused ? "-CONT" : "-STOP", p.Id.ToString() })!.WaitForExit();
+            paused = !paused;
+            pauseBtn.Content = paused ? "Resume" : "Pause";
+            SetStatus(paused ? "Paused" : "Speaking");
+        }
+        catch { }
+    }
+
+    async Task SaveWav()
+    {
+        if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Speak or sample something first, then save it"); return; }
+        var f = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save audio", SuggestedFileName = (lastLabel ?? "pipework") + ".wav", DefaultExtension = "wav",
+            FileTypeChoices = new[] { new FilePickerFileType("WAV audio") { Patterns = new[] { "*.wav" } } }
+        });
+        if (f == null) return;
+        File.Copy(lastRaw, f.Path.LocalPath, true);
+        SetStatus("Saved " + Path.GetFileName(f.Path.LocalPath));
+    }
+
+    async Task SaveText()
+    {
+        var text = input.Text ?? "";
+        if (string.IsNullOrWhiteSpace(text)) { SetStatus("The text box is empty"); return; }
+        var f = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save text", SuggestedFileName = "pipework.txt", DefaultExtension = "txt",
+            FileTypeChoices = new[] { new FilePickerFileType("Text") { Patterns = new[] { "*.txt" } } }
+        });
+        if (f == null) return;
+        File.WriteAllText(f.Path.LocalPath, text);
+        SetStatus("Saved " + Path.GetFileName(f.Path.LocalPath));
     }
 
     static void PadWav(string path, double seconds = 1.0)
@@ -230,39 +397,5 @@ public class MainWindow : Window
         BitConverter.GetBytes(dataLen + pad).CopyTo(o, dataPos - 4);
         BitConverter.GetBytes(o.Length - 8).CopyTo(o, 4);
         File.WriteAllBytes(path, o);
-    }
-
-    async Task Speak(string text, VoiceInfo v)
-    {
-        stopRequested = false;
-        await EnsurePiper();
-        if (!Installed(v)) await DownloadVoice(v);
-        var wav = Path.Combine(Path.GetTempPath(), "pipework.wav");
-        if (File.Exists(wav)) File.Delete(wav);
-        Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Wait);
-        SetStatus("Synthesizing…");
-        var psi = new ProcessStartInfo(PiperBin)
-        {
-            WorkingDirectory = Root, RedirectStandardInput = true, RedirectStandardError = true, UseShellExecute = false
-        };
-        psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(Path.Combine(VoiceDir, v.OnnxName));
-        psi.ArgumentList.Add("--output_file"); psi.ArgumentList.Add(wav);
-        using var p = Process.Start(psi)!;
-        piperProc = p;
-        var errTask = p.StandardError.ReadToEndAsync();
-        await p.StandardInput.WriteAsync(text);
-        p.StandardInput.Close();
-        await p.WaitForExitAsync();
-        var err = await errTask;
-        Cursor = Avalonia.Input.Cursor.Default;
-        if (stopRequested) { SetStatus("Stopped"); return; }
-        if (p.ExitCode != 0 || !File.Exists(wav))
-            throw new Exception(err.Trim().Split('\n').LastOrDefault() ?? "piper failed");
-        PadWav(wav);
-        SetStatus("Speaking with " + v.Key);
-        var pl = Process.Start("afplay", wav)!;
-        player = pl;
-        await pl.WaitForExitAsync();
-        SetStatus(stopRequested ? "Stopped" : "Done");
     }
 }

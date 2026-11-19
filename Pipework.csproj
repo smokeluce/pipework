@@ -22,4 +22,25 @@
     </PackageReference>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
   </ItemGroup>
+  <Target Name="PipeworkBuildInfo" BeforeTargets="CoreCompile">
+    <Exec Command="git rev-list --count HEAD 2>/dev/null" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCount" />
+    </Exec>
+    <Exec Command="git rev-parse --short HEAD 2>/dev/null" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitHash" />
+    </Exec>
+    <Exec Command="git status --porcelain --untracked-files=no 2>/dev/null" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitDirty" />
+    </Exec>
+    <PropertyGroup>
+      <GitCount Condition="'$(GitCount)' == ''">0</GitCount>
+      <GitHash Condition="'$(GitHash)' == ''">nogit</GitHash>
+      <GitMark Condition="'$(GitDirty)' != ''">+</GitMark>
+      <BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</BuildInfoFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(BuildInfoFile)" Lines="namespace Pipework { public static class BuildInfo { public const string Text = &quot;build $(GitCount)$(GitMark) - $(GitHash)&quot;%3B } }" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(BuildInfoFile)" />
+    </ItemGroup>
+  </Target>
 </Project>
