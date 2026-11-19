@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Assets/pipework-icon-1024.png" width="160" alt="Pipework icon">
+</p>
+
 # Pipework
 
 A small macOS app for Piper text-to-speech. Paste text, browse and download Piper voices, sample them, and have it read to you. Built with C# on .NET 8 and Avalonia, so it runs on older Macs (I wrote it on Monterey).
