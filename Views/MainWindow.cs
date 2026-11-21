@@ -37,6 +37,7 @@ class PipeworkSettings
     public double Speed { get; set; } = 1.0;
     public string? Filter { get; set; }
     public bool PaneHidden { get; set; }
+    public string? DashMode { get; set; }
 }
 
 public class MainWindow : Window
@@ -49,6 +50,7 @@ public class MainWindow : Window
     // TODO(settings): samples cache screen with size display and a clear button
     static readonly string SampleDir = Path.Combine(Root, "samples");
     static readonly string SettingsFile = Path.Combine(Root, "settings.json");
+    static string dashMode = "comma";
     const string VoicesBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
     const string SampleText = "Hello, this is a sample of this voice. The quick brown fox jumps over the lazy dog.";
 
@@ -135,7 +137,11 @@ public class MainWindow : Window
         var pb = new Button { Content = "‹ Voices", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 4), FontSize = 12, Margin = new Thickness(0, 0, 0, 10), HorizontalAlignment = HorizontalAlignment.Left };
         pb.Click += (_, _) => { SetPane(!paneHidden); SaveSettings(); };
         paneBtn = pb;
-        title.Children.Add(pb);
+        var sb = new Button { Content = "Settings", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 4), FontSize = 12, Margin = new Thickness(8, 0, 0, 10) };
+        sb.Click += async (_, _) => await Guard(ShowSettings);
+        var topRow = new StackPanel { Orientation = Orientation.Horizontal };
+        topRow.Children.Add(pb); topRow.Children.Add(sb);
+        title.Children.Add(topRow);
         title.Children.Add(new TextBlock { Text = "Pipework", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
         title.Children.Add(new TextBlock { Text = "Paste text, pick a voice, hit Speak", Foreground = Brush.Parse("#8B93A1"), FontSize = 12 });
         title.Children.Add(new TextBlock { Text = "v" + AppVersion + "  ·  " + BuildInfo.Text, Foreground = Brush.Parse("#5C6370"), FontSize = 11, Margin = new Thickness(0, 2, 0, 0) });
@@ -319,7 +325,7 @@ public class MainWindow : Window
             using var p = Process.Start(psi)!;
             piperProc = p;
             var errTask = p.StandardError.ReadToEndAsync();
-            await p.StandardInput.WriteAsync(text);
+            await p.StandardInput.WriteAsync(PrepText(text));
             p.StandardInput.Close();
             await p.WaitForExitAsync();
             var err = await errTask;
@@ -436,6 +442,58 @@ public class MainWindow : Window
         catch { }
     }
 
+    async Task ShowSettings()
+    {
+        static TextBlock Section(string t) => new() { Text = t, FontSize = 14, FontWeight = FontWeight.SemiBold, Foreground = Brushes.White, Margin = new Thickness(0, 10, 0, 0) };
+        static TextBlock Note(string t) => new() { Text = t, FontSize = 12, Foreground = Brush.Parse("#8B93A1"), TextWrapping = TextWrapping.Wrap };
+
+        var cacheInfo = new TextBlock { Foreground = Brush.Parse("#C9CED6"), FontSize = 13 };
+        void RefreshCache()
+        {
+            var files = Directory.Exists(SampleDir) ? Directory.GetFiles(SampleDir, "*.wav") : Array.Empty<string>();
+            long bytes = files.Sum(f => new FileInfo(f).Length);
+            cacheInfo.Text = files.Length + (files.Length == 1 ? " cached sample  ·  " : " cached samples  ·  ")
+                + (bytes >= 1048576 ? (bytes / 1048576.0).ToString("0.0", CultureInfo.InvariantCulture) + " MB" : (bytes / 1024) + " KB");
+        }
+        RefreshCache();
+
+        var clear = Btn("Clear samples cache", "#3A2A2E");
+        clear.HorizontalAlignment = HorizontalAlignment.Left;
+        clear.Click += (_, _) =>
+        {
+            if (Directory.Exists(SampleDir)) foreach (var f in Directory.GetFiles(SampleDir, "*.wav")) TryDelete(f);
+            RefreshCache();
+        };
+
+        var modes = new[] { ("comma", "Comma (short pause)"), ("period", "Period (medium pause)"), ("ellipsis", "Ellipsis (long pause)"), ("off", "Off (leave -- as typed)") };
+        var combo = new ComboBox { ItemsSource = modes.Select(m => m.Item2).ToList(), MinWidth = 260, HorizontalAlignment = HorizontalAlignment.Left };
+        combo.SelectedIndex = Math.Max(0, Array.FindIndex(modes, m => m.Item1 == dashMode));
+        combo.SelectionChanged += (_, _) => { if (combo.SelectedIndex >= 0) { dashMode = modes[combo.SelectedIndex].Item1; SaveSettings(); } };
+
+        var panel = new StackPanel { Spacing = 10, Margin = new Thickness(24) };
+        panel.Children.Add(new TextBlock { Text = "Settings", FontSize = 20, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
+        panel.Children.Add(Section("Samples cache"));
+        panel.Children.Add(Note("Voice previews are kept so repeat samples play instantly."));
+        panel.Children.Add(cacheInfo);
+        panel.Children.Add(clear);
+        panel.Children.Add(Section("Double-dash pause"));
+        panel.Children.Add(Note("What -- between words becomes before the text goes to Piper."));
+        panel.Children.Add(combo);
+        panel.Children.Add(Note("Heads up: pause length differs between voices. Each one learned its own timing, so the longest option can change from voice to voice. Try a few on your favorite voice to find what works."));
+        var done = Btn("Done", "#2D6CDF");
+        done.Margin = new Thickness(0, 14, 0, 0);
+        done.HorizontalAlignment = HorizontalAlignment.Left;
+        panel.Children.Add(done);
+
+        var win = new Window
+        {
+            Title = "Settings", Width = 460, Height = 540, CanResize = false,
+            Background = Brush.Parse("#121418"), WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = panel
+        };
+        done.Click += (_, _) => win.Close();
+        await win.ShowDialog(this);
+    }
+
     static double WavSeconds(string path)
     {
         var b = File.ReadAllBytes(path);
@@ -488,6 +546,7 @@ public class MainWindow : Window
                     if (st.Filter != null) search.Text = st.Filter;
                     speed.Value = st.Speed;
                     SetPane(st.PaneHidden);
+                    dashMode = st.DashMode ?? "comma";
                 }
             }
         }
@@ -501,10 +560,16 @@ public class MainWindow : Window
         try
         {
             Directory.CreateDirectory(Root);
-            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden };
+            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden, DashMode = dashMode };
             File.WriteAllText(SettingsFile, JsonSerializer.Serialize(st));
         }
         catch { }
+    }
+
+    static string PrepText(string t)
+    {
+        var r = dashMode switch { "period" => ". ", "ellipsis" => "... ", "off" => null, _ => ", " };
+        return r == null ? t : Regex.Replace(t, @"(?<=\w)\s*-{2,}\s*(?=\w)", r);
     }
 
     static void PadWav(string path, double seconds = 1.0)
