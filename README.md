@@ -4,7 +4,7 @@
 
 # Pipework
 
-![Version](https://img.shields.io/github/v/tag/smokeluce/pipework?label=version) ![Last commit](https://img.shields.io/github/last-commit/smokeluce/pipework) ![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4) ![Avalonia](https://img.shields.io/badge/UI-Avalonia-8B44AC) ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-lightgrey) ![Piper TTS](https://img.shields.io/badge/TTS-Piper-2D6CDF)
+![Version](https://img.shields.io/github/v/tag/smokeluce/pipework?label=version) ![Last commit](https://img.shields.io/github/last-commit/smokeluce/pipework) ![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4) ![Avalonia](https://img.shields.io/badge/UI-Avalonia-8B44AC) ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-lightgrey) ![Piper TTS](https://img.shields.io/badge/TTS-Piper-2D6CDF) ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 A small macOS app for Piper text-to-speech. Paste text, browse and download Piper voices, sample them, and have it read to you. Built with C# on .NET 8 and Avalonia, so it runs on older Macs (I wrote it on Monterey).
 
@@ -60,6 +60,10 @@ Voices are stored in `~/.local/share/piper-voices`, the same folder Piper's own 
 - Build script for the .app bundle
 - Windows and Linux builds, which need playback, paths and Piper discovery moved behind a small platform layer
 - Sample on another voice should stop the current one and switch
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Paul Swonger.
 
 ## Credits
 
