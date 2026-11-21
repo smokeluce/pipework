@@ -31,6 +31,12 @@ public class VoiceInfo
     public string OnnxName => Files.Where(f => f.EndsWith(".onnx")).Select(Path.GetFileName).FirstOrDefault() ?? "";
 }
 
+class PauseRule
+{
+    public string Find { get; set; } = "";
+    public string Pause { get; set; } = "comma";
+}
+
 class PipeworkSettings
 {
     public string? Voice { get; set; }
@@ -38,6 +44,7 @@ class PipeworkSettings
     public string? Filter { get; set; }
     public bool PaneHidden { get; set; }
     public string? DashMode { get; set; }
+    public List<PauseRule>? Rules { get; set; }
 }
 
 public class MainWindow : Window
@@ -51,6 +58,7 @@ public class MainWindow : Window
     static readonly string SampleDir = Path.Combine(Root, "samples");
     static readonly string SettingsFile = Path.Combine(Root, "settings.json");
     static string dashMode = "comma";
+    static List<PauseRule> pauseRules = new();
     const string VoicesBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
     const string SampleText = "Hello, this is a sample of this voice. The quick brown fox jumps over the lazy dog.";
 
@@ -480,18 +488,78 @@ public class MainWindow : Window
         panel.Children.Add(Note("What -- between words becomes before the text goes to Piper."));
         panel.Children.Add(combo);
         panel.Children.Add(Note("Heads up: pause length differs between voices. Each one learned its own timing, so the longest option can change from voice to voice. Try a few on your favorite voice to find what works."));
+        panel.Children.Add(Section("Custom pause rules"));
+        panel.Children.Add(Note("Add a symbol or word and pick a pause. Symbols (like / or •) are replaced by the pause. Words keep their text and get a pause after them. Matching ignores case."));
+        var ruleList = new ListBox { Height = 130, Background = Brush.Parse("#1B1E25") };
+        void RefreshRules() => ruleList.ItemsSource = pauseRules.Select(r => "\"" + r.Find + "\"  →  " + r.Pause).ToList();
+        RefreshRules();
+        var findBox = new TextBox();
+        var pauseBox = new ComboBox { ItemsSource = new[] { "comma", "period", "ellipsis" }, SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var add = Btn("Add", "#2A2F3A");
+        add.Click += (_, _) =>
+        {
+            var f = (findBox.Text ?? "").Trim();
+            if (f.Length == 0) return;
+            pauseRules.Add(new PauseRule { Find = f, Pause = (string)pauseBox.SelectedItem! });
+            findBox.Text = "";
+            RefreshRules(); SaveSettings();
+        };
+        var addCol = new StackPanel { Spacing = 6, Margin = new Thickness(16, 0, 0, 0) };
+        addCol.Children.Add(Note("Text to match"));
+        addCol.Children.Add(findBox);
+        addCol.Children.Add(Note("Pause type"));
+        addCol.Children.Add(pauseBox);
+        add.HorizontalAlignment = HorizontalAlignment.Left;
+        addCol.Children.Add(add);
+        var remove = Btn("Remove", "#3A2A2E");
+        remove.HorizontalAlignment = HorizontalAlignment.Left;
+        remove.Click += (_, _) =>
+        {
+            var i = ruleList.SelectedIndex;
+            if (i >= 0 && i < pauseRules.Count) { pauseRules.RemoveAt(i); RefreshRules(); SaveSettings(); }
+        };
+        var listCol = new StackPanel { Spacing = 6 };
+        listCol.Children.Add(ruleList);
+        addCol.Children.Remove(add);
+        var btnRow = new WrapPanel();
+        btnRow.Children.Add(add); btnRow.Children.Add(remove);
+        addCol.Children.Add(btnRow);
+        var rulesGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*") };
+        Grid.SetColumn(addCol, 1);
+        rulesGrid.Children.Add(listCol);
+        rulesGrid.Children.Add(addCol);
+        panel.Children.Add(rulesGrid);
         var done = Btn("Done", "#2D6CDF");
-        done.Margin = new Thickness(0, 14, 0, 0);
-        done.HorizontalAlignment = HorizontalAlignment.Left;
-        panel.Children.Add(done);
+        btnRow.Children.Add(done);
 
         var win = new Window
         {
-            Title = "Settings", Width = 460, Height = 540, CanResize = false,
-            Background = Brush.Parse("#121418"), WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = panel
+            Title = "Settings", Width = 680, Height = 610, CanResize = false,
+            Background = Brush.Parse("#121418"), WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = new ScrollViewer { Content = panel }
         };
         done.Click += (_, _) => win.Close();
         await win.ShowDialog(this);
+    }
+
+    static string PauseText(string name) => name switch { "period" => ". ", "ellipsis" => "... ", _ => ", " };
+
+    // Symbols are replaced by the pause; words keep their text and get the pause after them.
+    static string ApplyRules(string t)
+    {
+        foreach (var r in pauseRules)
+        {
+            if (string.IsNullOrEmpty(r.Find)) continue;
+            var pause = PauseText(r.Pause);
+            var pat = Regex.Escape(r.Find);
+            if (r.Find.Any(char.IsLetterOrDigit))
+            {
+                var pre = char.IsLetterOrDigit(r.Find[0]) ? @"(?<!\w)" : "";
+                var post = char.IsLetterOrDigit(r.Find[^1]) ? @"(?!\w)" : "";
+                t = Regex.Replace(t, pre + pat + post, m => m.Value + pause, RegexOptions.IgnoreCase);
+            }
+            else t = Regex.Replace(t, @"\s*" + pat + @"\s*", pause);
+        }
+        return t;
     }
 
     static double WavSeconds(string path)
@@ -547,6 +615,7 @@ public class MainWindow : Window
                     speed.Value = st.Speed;
                     SetPane(st.PaneHidden);
                     dashMode = st.DashMode ?? "comma";
+                    pauseRules = st.Rules ?? new List<PauseRule>();
                 }
             }
         }
@@ -560,7 +629,7 @@ public class MainWindow : Window
         try
         {
             Directory.CreateDirectory(Root);
-            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden, DashMode = dashMode };
+            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden, DashMode = dashMode, Rules = pauseRules };
             File.WriteAllText(SettingsFile, JsonSerializer.Serialize(st));
         }
         catch { }
@@ -569,7 +638,7 @@ public class MainWindow : Window
     static string PrepText(string t)
     {
         var r = dashMode switch { "period" => ". ", "ellipsis" => "... ", "off" => null, _ => ", " };
-        return r == null ? t : Regex.Replace(t, @"(?<=\w)\s*-{2,}\s*(?=\w)", r);
+        return ApplyRules(r == null ? t : Regex.Replace(t, @"(?<=\w)\s*-{2,}\s*(?=\w)", r));
     }
 
     static void PadWav(string path, double seconds = 1.0)
