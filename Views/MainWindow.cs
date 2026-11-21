@@ -5,8 +5,11 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Avalonia.Threading;
+using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -28,6 +31,14 @@ public class VoiceInfo
     public string OnnxName => Files.Where(f => f.EndsWith(".onnx")).Select(Path.GetFileName).FirstOrDefault() ?? "";
 }
 
+class PipeworkSettings
+{
+    public string? Voice { get; set; }
+    public double Speed { get; set; } = 1.0;
+    public string? Filter { get; set; }
+    public bool PaneHidden { get; set; }
+}
+
 public class MainWindow : Window
 {
     const string AppVersion = "0.1";
@@ -37,6 +48,7 @@ public class MainWindow : Window
     static readonly string VoiceDir = Path.Combine(Home, ".local/share/piper-voices");
     // TODO(settings): samples cache screen with size display and a clear button
     static readonly string SampleDir = Path.Combine(Root, "samples");
+    static readonly string SettingsFile = Path.Combine(Root, "settings.json");
     const string VoicesBase = "https://huggingface.co/rhasspy/piper-voices/resolve/main/";
     const string SampleText = "Hello, this is a sample of this voice. The quick brown fox jumps over the lazy dog.";
 
@@ -53,6 +65,12 @@ public class MainWindow : Window
     Process? piperProc, player;
     string? piperPath, lastRaw, lastLabel;
     bool busy, stopRequested, paused;
+    string? doneNote, wantVoice, lastVoice;
+    TimeSpan? lastSynthTime;
+    bool loadingSettings, paneHidden;
+    Grid? rootGrid;
+    Border? leftCard, rightCard;
+    Button? paneBtn;
 
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
     double Rate => Math.Round(speed.Value * 20) / 20;
@@ -89,13 +107,15 @@ public class MainWindow : Window
         {
             if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Nothing to replay yet"); return; }
             stopRequested = false;
+            doneNote = "Replayed  ·  " + ClipInfo(lastRaw);
             await Play(lastRaw, lastLabel ?? "");
         });
         saveWav.Click += async (_, _) => await Guard(SaveWav);
         saveTxt.Click += async (_, _) => await Guard(SaveText);
 
-        search.PropertyChanged += (_, e) => { if (e.Property == TextBox.TextProperty) RefreshList(); };
-        speed.PropertyChanged += (_, e) => { if (e.Property == RangeBase.ValueProperty) speedLabel.Text = "Speed " + Rate.ToString("0.00", CultureInfo.InvariantCulture) + "x"; };
+        search.PropertyChanged += (_, e) => { if (e.Property == TextBox.TextProperty) { RefreshList(); SaveSettings(); } };
+        speed.PropertyChanged += (_, e) => { if (e.Property == RangeBase.ValueProperty) { speedLabel.Text = "Speed " + Rate.ToString("0.00", CultureInfo.InvariantCulture) + "x"; SaveSettings(); } };
+        list.SelectionChanged += (_, _) => { if (Selected != null && Selected.Key != lastVoice) { lastVoice = Selected.Key; SaveSettings(); } };
         speedLabel.PointerPressed += (_, _) => speed.Value = 1.0;
 
         var left = new DockPanel();
@@ -112,6 +132,10 @@ public class MainWindow : Window
 
         var right = new DockPanel();
         var title = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+        var pb = new Button { Content = "‹ Voices", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 4), FontSize = 12, Margin = new Thickness(0, 0, 0, 10), HorizontalAlignment = HorizontalAlignment.Left };
+        pb.Click += (_, _) => { SetPane(!paneHidden); SaveSettings(); };
+        paneBtn = pb;
+        title.Children.Add(pb);
         title.Children.Add(new TextBlock { Text = "Pipework", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
         title.Children.Add(new TextBlock { Text = "Paste text, pick a voice, hit Speak", Foreground = Brush.Parse("#8B93A1"), FontSize = 12 });
         title.Children.Add(new TextBlock { Text = "v" + AppVersion + "  ·  " + BuildInfo.Text, Foreground = Brush.Parse("#5C6370"), FontSize = 11, Margin = new Thickness(0, 2, 0, 0) });
@@ -134,8 +158,10 @@ public class MainWindow : Window
         Grid.SetColumn(rc, 1);
         root.Children.Add(lc); root.Children.Add(rc);
         Content = root;
+        rootGrid = root; leftCard = lc; rightCard = rc;
+        LoadSettings();
 
-        Opened += async (_, _) => await Run(LoadVoices);
+        Opened += async (_, _) => { SetDockIcon(); await Run(LoadVoices); };
     }
 
     static Border Card(Control child) => new() { Background = Brush.Parse("#1B1E25"), CornerRadius = new CornerRadius(14), Padding = new Thickness(16), Child = child };
@@ -172,10 +198,11 @@ public class MainWindow : Window
     void RefreshList()
     {
         var terms = (search.Text ?? "").ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var sel = Selected?.Key;
+        var sel = Selected?.Key ?? wantVoice;
         shown = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
         list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "↓  ") + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
         list.SelectedIndex = sel == null ? -1 : shown.FindIndex(v => v.Key == sel);
+        if (all.Count > 0) wantVoice = null;
         count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed  ·  ↓ = download";
     }
 
@@ -265,6 +292,7 @@ public class MainWindow : Window
     async Task<string?> Synthesize(string text, VoiceInfo v, bool cache)
     {
         stopRequested = false;
+        lastSynthTime = null;
         var raw = cache ? Path.Combine(SampleDir, v.Key + ".wav") : Path.Combine(Path.GetTempPath(), "pipework-" + DateTime.Now.ToString("HHmmssfff") + ".wav");
         Directory.CreateDirectory(Path.GetDirectoryName(raw)!);
         if (cache && File.Exists(raw)) return raw;
@@ -274,7 +302,11 @@ public class MainWindow : Window
         if (!Installed(v)) await DownloadVoice(v);
         if (File.Exists(raw)) File.Delete(raw);
 
-        SetStatus("Synthesizing…");
+        SetStatus("Synthesizing… (0 secs)");
+        var sw = Stopwatch.StartNew();
+        var ticker = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        ticker.Tick += (_, _) => SetStatus("Synthesizing… (" + (int)sw.Elapsed.TotalSeconds + " secs)");
+        ticker.Start();
         Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Wait);
         try
         {
@@ -299,7 +331,8 @@ public class MainWindow : Window
                 throw new Exception(err.Trim().Split('\n').LastOrDefault() ?? "piper failed");
             }
         }
-        finally { Cursor = Avalonia.Input.Cursor.Default; }
+        finally { ticker.Stop(); Cursor = Avalonia.Input.Cursor.Default; }
+        lastSynthTime = sw.Elapsed;
         return raw;
     }
 
@@ -310,6 +343,11 @@ public class MainWindow : Window
         var prev = lastRaw;
         lastRaw = raw; lastLabel = v.Key;
         if (prev != null && prev != raw && prev.StartsWith(Path.GetTempPath())) TryDelete(prev);
+        var words = Regex.Matches(text, @"\S+").Count;
+        var info = ClipInfo(raw);
+        doneNote = lastSynthTime == null
+            ? "Sample from cache  ·  " + info
+            : "Synthesized " + words + (words == 1 ? " word" : " words") + " in " + lastSynthTime.Value.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + "s  ·  " + info;
         await Play(raw, v.Key);
     }
 
@@ -326,13 +364,13 @@ public class MainWindow : Window
             psi.ArgumentList.Add("-q"); psi.ArgumentList.Add("1");
         }
         psi.ArgumentList.Add(play);
-        SetStatus("Speaking with " + label + (Math.Abs(rate - 1.0) > 0.001 ? " at " + rate.ToString("0.00", CultureInfo.InvariantCulture) + "x" : ""));
+        SetStatus("Speaking with " + label + (Math.Abs(rate - 1.0) > 0.001 ? " at " + rate.ToString("0.00", CultureInfo.InvariantCulture) + "x" : "") + "  ·  " + ClipInfo(raw, rate));
         paused = false; pauseBtn.Content = "Pause";
         using var pl = Process.Start(psi)!;
         player = pl;
         try { await pl.WaitForExitAsync(); }
         finally { player = null; paused = false; pauseBtn.Content = "Pause"; }
-        SetStatus(stopRequested ? "Stopped" : "Done");
+        SetStatus(stopRequested ? "Stopped" : (doneNote ?? "Done"));
     }
 
     void TogglePause()
@@ -374,6 +412,99 @@ public class MainWindow : Window
         if (f == null) return;
         File.WriteAllText(f.Path.LocalPath, text);
         SetStatus("Saved " + Path.GetFileName(f.Path.LocalPath));
+    }
+
+    [DllImport("/usr/lib/libobjc.dylib")] static extern IntPtr objc_getClass(string name);
+    [DllImport("/usr/lib/libobjc.dylib")] static extern IntPtr sel_registerName(string name);
+    [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")] static extern IntPtr MsgSend(IntPtr receiver, IntPtr sel);
+    [DllImport("/usr/lib/libobjc.dylib", EntryPoint = "objc_msgSend")] static extern IntPtr MsgSend(IntPtr receiver, IntPtr sel, IntPtr arg);
+
+    // Sets the Dock icon at runtime so it shows even under `dotnet run` (no .app bundle).
+    static void SetDockIcon()
+    {
+        try
+        {
+            Directory.CreateDirectory(Root);
+            var tmp = Path.Combine(Root, "dock-icon.png");
+            using (var src = Avalonia.Platform.AssetLoader.Open(new Uri("avares://Pipework/Assets/pipework-icon.png")))
+            using (var dst = File.Create(tmp)) src.CopyTo(dst);
+            var path = MsgSend(objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"), Marshal.StringToHGlobalAnsi(tmp));
+            var img = MsgSend(MsgSend(objc_getClass("NSImage"), sel_registerName("alloc")), sel_registerName("initWithContentsOfFile:"), path);
+            if (img == IntPtr.Zero) return;
+            MsgSend(MsgSend(objc_getClass("NSApplication"), sel_registerName("sharedApplication")), sel_registerName("setApplicationIconImage:"), img);
+        }
+        catch { }
+    }
+
+    static double WavSeconds(string path)
+    {
+        var b = File.ReadAllBytes(path);
+        int pos = 12, ch = 1, rate = 22050, bits = 16, dataLen = 0;
+        while (pos + 8 <= b.Length)
+        {
+            var id = System.Text.Encoding.ASCII.GetString(b, pos, 4);
+            int len = BitConverter.ToInt32(b, pos + 4);
+            if (id == "fmt ") { ch = BitConverter.ToInt16(b, pos + 10); rate = BitConverter.ToInt32(b, pos + 12); bits = BitConverter.ToInt16(b, pos + 22); }
+            else if (id == "data") { dataLen = len; if (dataLen <= 0 || pos + 8 + dataLen > b.Length) dataLen = b.Length - (pos + 8); break; }
+            pos += 8 + len + (len & 1);
+        }
+        int bps = rate * ch * (bits / 8);
+        return bps > 0 ? (double)dataLen / bps : 0;
+    }
+
+    static string ClipInfo(string path, double rate = 1.0)
+    {
+        try
+        {
+            var secs = WavSeconds(path) / rate;
+            var bytes = new FileInfo(path).Length;
+            var size = bytes >= 1048576 ? (bytes / 1048576.0).ToString("0.0", CultureInfo.InvariantCulture) + " MB" : (bytes / 1024) + " KB";
+            return ((int)secs / 60) + ":" + ((int)secs % 60).ToString("00") + "  ·  " + size;
+        }
+        catch { return "?"; }
+    }
+
+    void SetPane(bool hidden)
+    {
+        paneHidden = hidden;
+        if (leftCard == null || rootGrid == null || rightCard == null) return;
+        leftCard.IsVisible = !hidden;
+        rootGrid.ColumnDefinitions[0].Width = hidden ? new GridLength(0) : new GridLength(360);
+        rightCard.Margin = new Thickness(hidden ? 0 : 16, 0, 0, 0);
+        if (paneBtn != null) paneBtn.Content = hidden ? "› Voices" : "‹ Voices";
+    }
+
+    void LoadSettings()
+    {
+        loadingSettings = true;
+        try
+        {
+            if (File.Exists(SettingsFile))
+            {
+                var st = JsonSerializer.Deserialize<PipeworkSettings>(File.ReadAllText(SettingsFile));
+                if (st != null)
+                {
+                    wantVoice = st.Voice; lastVoice = st.Voice;
+                    if (st.Filter != null) search.Text = st.Filter;
+                    speed.Value = st.Speed;
+                    SetPane(st.PaneHidden);
+                }
+            }
+        }
+        catch { }
+        finally { loadingSettings = false; }
+    }
+
+    void SaveSettings()
+    {
+        if (loadingSettings) return;
+        try
+        {
+            Directory.CreateDirectory(Root);
+            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden };
+            File.WriteAllText(SettingsFile, JsonSerializer.Serialize(st));
+        }
+        catch { }
     }
 
     static void PadWav(string path, double seconds = 1.0)

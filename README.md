@@ -6,6 +6,11 @@
 
 A small macOS app for Piper text-to-speech. Paste text, browse and download Piper voices, sample them, and have it read to you. Built with C# on .NET 8 and Avalonia, so it runs on older Macs (I wrote it on Monterey).
 
+<p align="center">
+  <img src="Assets/screenshot-main.png" width="49%" alt="Pipework main window">
+  <img src="Assets/screenshot-collapsed.png" width="49%" alt="Pipework with the voices pane collapsed">
+</p>
+
 ## What it does
 
 - Browse the full Piper voice catalog, filter by language, name or quality
