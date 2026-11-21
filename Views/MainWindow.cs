@@ -82,6 +82,11 @@ public class MainWindow : Window
     Border? leftCard, rightCard;
     Button? paneBtn;
 
+    double segOffset, segPad, segRate, resumePos, totalSecs;
+    Stopwatch? segClock;
+    bool pauseRequested;
+    TaskCompletionSource<bool>? resumeTcs;
+
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
     double Rate => Math.Round(speed.Value * 20) / 20;
 
@@ -112,7 +117,7 @@ public class MainWindow : Window
             await SpeakAndPlay(input.Text!, v, false);
         });
         pauseBtn.Click += (_, _) => TogglePause();
-        stop.Click += (_, _) => { stopRequested = true; Kill(piperProc); Kill(player); };
+        stop.Click += (_, _) => { stopRequested = true; Kill(piperProc); Kill(player); resumeTcs?.TrySetResult(false); };
         replay.Click += async (_, _) => await Run(async () =>
         {
             if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Nothing to replay yet"); return; }
@@ -367,38 +372,66 @@ public class MainWindow : Window
 
     async Task Play(string raw, string label)
     {
+        totalSecs = WavSeconds(raw);
+        double from = 0;
+        pauseRequested = false; paused = false; pauseBtn.Content = "Pause";
+        try
+        {
+            while (true)
+            {
+                var rate = Rate;
+                SetStatus("Speaking with " + label + (Math.Abs(rate - 1.0) > 0.001 ? " at " + rate.ToString("0.00", CultureInfo.InvariantCulture) + "x" : "") + "  ·  " + ClipInfo(raw, rate));
+                await PlaySegment(raw, from, rate);
+                if (!pauseRequested || stopRequested) break;
+                resumeTcs = new TaskCompletionSource<bool>();
+                SetStatus("Paused");
+                if (!await resumeTcs.Task) break;
+                pauseRequested = false; paused = false; pauseBtn.Content = "Pause";
+                from = Math.Max(0, resumePos - 0.4);
+            }
+        }
+        finally { player = null; resumeTcs = null; pauseRequested = false; paused = false; pauseBtn.Content = "Pause"; }
+        SetStatus(stopRequested ? "Stopped" : (doneNote ?? "Done"));
+    }
+
+    async Task PlaySegment(string raw, double from, double rate)
+    {
         var play = Path.Combine(Path.GetTempPath(), "pipework-play.wav");
-        File.Copy(raw, play, true);
-        PadWav(play);
+        var pad = from > 0 ? 0.5 : 1.0;
+        if (from > 0) TrimWav(raw, play, from); else File.Copy(raw, play, true);
+        PadWav(play, pad);
         var psi = new ProcessStartInfo("afplay") { UseShellExecute = false };
-        var rate = Rate;
         if (Math.Abs(rate - 1.0) > 0.001)
         {
             psi.ArgumentList.Add("-r"); psi.ArgumentList.Add(rate.ToString("0.00", CultureInfo.InvariantCulture));
             psi.ArgumentList.Add("-q"); psi.ArgumentList.Add("1");
         }
         psi.ArgumentList.Add(play);
-        SetStatus("Speaking with " + label + (Math.Abs(rate - 1.0) > 0.001 ? " at " + rate.ToString("0.00", CultureInfo.InvariantCulture) + "x" : "") + "  ·  " + ClipInfo(raw, rate));
-        paused = false; pauseBtn.Content = "Pause";
+        segOffset = from; segPad = pad; segRate = rate;
         using var pl = Process.Start(psi)!;
         player = pl;
+        segClock = Stopwatch.StartNew();
         try { await pl.WaitForExitAsync(); }
-        finally { player = null; paused = false; pauseBtn.Content = "Pause"; }
-        SetStatus(stopRequested ? "Stopped" : (doneNote ?? "Done"));
+        finally { player = null; }
     }
+
 
     void TogglePause()
     {
-        var p = player;
-        if (p == null) return;
-        try
+        if (paused)
         {
-            Process.Start("/bin/kill", new[] { paused ? "-CONT" : "-STOP", p.Id.ToString() })!.WaitForExit();
-            paused = !paused;
-            pauseBtn.Content = paused ? "Resume" : "Pause";
-            SetStatus(paused ? "Paused" : "Speaking");
+            paused = false;
+            resumeTcs?.TrySetResult(true);
+            return;
         }
-        catch { }
+        var p = player;
+        if (p == null || segClock == null) return;
+        var pos = segOffset + Math.Max(0, segClock.Elapsed.TotalSeconds * segRate - segPad);
+        if (pos >= totalSecs - 0.15) return;
+        resumePos = pos;
+        paused = true; pauseRequested = true;
+        pauseBtn.Content = "Resume";
+        Kill(p);
     }
 
     async Task SaveWav()
@@ -639,6 +672,31 @@ public class MainWindow : Window
     {
         var r = dashMode switch { "period" => ". ", "ellipsis" => "... ", "off" => null, _ => ", " };
         return ApplyRules(r == null ? t : Regex.Replace(t, @"(?<=\w)\s*-{2,}\s*(?=\w)", r));
+    }
+
+    static void TrimWav(string src, string dst, double fromSeconds)
+    {
+        var b = File.ReadAllBytes(src);
+        int pos = 12, ch = 1, rate = 22050, bits = 16, dataPos = -1, dataLen = 0;
+        while (pos + 8 <= b.Length)
+        {
+            var id = System.Text.Encoding.ASCII.GetString(b, pos, 4);
+            int len = BitConverter.ToInt32(b, pos + 4);
+            if (id == "fmt ") { ch = BitConverter.ToInt16(b, pos + 10); rate = BitConverter.ToInt32(b, pos + 12); bits = BitConverter.ToInt16(b, pos + 22); }
+            else if (id == "data") { dataPos = pos + 8; dataLen = len; break; }
+            pos += 8 + len + (len & 1);
+        }
+        if (dataPos < 0) { File.Copy(src, dst, true); return; }
+        if (dataLen <= 0 || dataPos + dataLen > b.Length) dataLen = b.Length - dataPos;
+        int block = Math.Max(1, ch * (bits / 8));
+        int skip = Math.Min((int)(rate * Math.Max(0, fromSeconds)) * block, dataLen);
+        int newLen = dataLen - skip;
+        var o = new byte[dataPos + newLen];
+        Array.Copy(b, 0, o, 0, dataPos);
+        Array.Copy(b, dataPos + skip, o, dataPos, newLen);
+        BitConverter.GetBytes(newLen).CopyTo(o, dataPos - 4);
+        BitConverter.GetBytes(o.Length - 8).CopyTo(o, 4);
+        File.WriteAllBytes(dst, o);
     }
 
     static void PadWav(string path, double seconds = 1.0)
