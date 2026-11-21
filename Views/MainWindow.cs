@@ -49,7 +49,7 @@ class PipeworkSettings
 
 public class MainWindow : Window
 {
-    const string AppVersion = "0.1";
+    const string AppVersion = "0.2";
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(30) };
     static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     static readonly string Root = Path.Combine(Home, "Library/Application Support/Pipework");
@@ -86,6 +86,7 @@ public class MainWindow : Window
     Stopwatch? segClock;
     bool pauseRequested;
     TaskCompletionSource<bool>? resumeTcs;
+    Window? guideWin;
 
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
     double Rate => Math.Round(speed.Value * 20) / 20;
@@ -153,7 +154,9 @@ public class MainWindow : Window
         var sb = new Button { Content = "Settings", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 4), FontSize = 12, Margin = new Thickness(8, 0, 0, 10) };
         sb.Click += async (_, _) => await Guard(ShowSettings);
         var topRow = new StackPanel { Orientation = Orientation.Horizontal };
-        topRow.Children.Add(pb); topRow.Children.Add(sb);
+        var gb = new Button { Content = "Guide", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 4), FontSize = 12, Margin = new Thickness(8, 0, 0, 10) };
+        gb.Click += async (_, _) => await Guard(ShowGuide);
+        topRow.Children.Add(pb); topRow.Children.Add(sb); topRow.Children.Add(gb);
         title.Children.Add(topRow);
         title.Children.Add(new TextBlock { Text = "Pipework", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
         title.Children.Add(new TextBlock { Text = "Paste text, pick a voice, hit Speak", Foreground = Brush.Parse("#8B93A1"), FontSize = 12 });
@@ -481,6 +484,68 @@ public class MainWindow : Window
             MsgSend(MsgSend(objc_getClass("NSApplication"), sel_registerName("sharedApplication")), sel_registerName("setApplicationIconImage:"), img);
         }
         catch { }
+    }
+
+    static string Tilde(string p) => p.StartsWith(Home) ? "~" + p.Substring(Home.Length) : p;
+
+    Task ShowGuide()
+    {
+        if (guideWin != null) { guideWin.Activate(); return Task.CompletedTask; }
+        static TextBlock H(string t) => new() { Text = t, FontSize = 15, FontWeight = FontWeight.SemiBold, Foreground = Brushes.White, Margin = new Thickness(0, 18, 0, 0) };
+        static TextBlock P(string t) => new() { Text = t, FontSize = 13, Foreground = Brush.Parse("#C9CED6"), TextWrapping = TextWrapping.Wrap, LineHeight = 20 };
+        static TextBlock Code(string t) => new() { Text = t, FontFamily = new FontFamily("Menlo"), FontSize = 13, Foreground = Brush.Parse("#7FB2FF"), Margin = new Thickness(0, 4, 0, 0) };
+
+        var panel = new StackPanel { Spacing = 8, Margin = new Thickness(28) };
+        panel.Children.Add(new TextBlock { Text = "Guide", FontSize = 22, FontWeight = FontWeight.Bold, Foreground = Brushes.White });
+
+        panel.Children.Add(H("What Piper is"));
+        panel.Children.Add(P("Piper is a fast text-to-speech engine that runs entirely on your computer, with no internet needed once a voice is downloaded. Pipework is a front end for it: it finds voices, downloads them, and hands your text to Piper to turn into audio."));
+
+        panel.Children.Add(H("Reading a voice name"));
+        panel.Children.Add(Code("en_US-libritts-high"));
+        panel.Children.Add(P("A voice name has three parts. en_US is the language and region (English, United States). libritts is the voice itself, usually named after the person or dataset it was trained on. high is the quality tier. So en_GB-alan-medium reads as British English, the voice alan, medium quality. Underscores inside a part, like libritts_r or hfc_female, belong to the voice name and are not separators."));
+
+        panel.Children.Add(H("Quality tiers"));
+        panel.Children.Add(P("x_low: 16 kHz audio and the smallest model. Tiny and quick, but the most robotic."));
+        panel.Children.Add(P("low: 16 kHz audio with a larger model than x_low. Fine for casual listening."));
+        panel.Children.Add(P("medium: 22.05 kHz audio. The usual sweet spot of quality, size and speed."));
+        panel.Children.Add(P("high: 22.05 kHz audio and the largest model. The most natural, with bigger downloads and slower synthesis."));
+        panel.Children.Add(P("Higher is not always better for a given voice, so use Sample to compare before committing to a long passage."));
+
+        panel.Children.Add(H("Multi-speaker voices"));
+        panel.Children.Add(P("Some voices, the libritts ones for example, are multi-speaker models that hold many different people in one file. Pipework uses the model's default speaker for now, so you hear one voice from it. A speaker picker is on the wishlist."));
+
+        panel.Children.Add(H("Using the app"));
+        panel.Children.Add(P("The ● mark in the voice list means a voice is downloaded. The ↓ mark means it is available to download."));
+        panel.Children.Add(P("Sample plays a short test line and keeps it, so repeat samples are instant. The first synthesis with a voice takes a moment while the model loads."));
+        panel.Children.Add(P("Speed only changes playback, so saved WAV files are always at normal speed."));
+        panel.Children.Add(P("In Settings, text like -- between words becomes a pause, and you can add your own pause rules. Pause length differs between voices, since each one learned its own timing."));
+
+        panel.Children.Add(H("Voice licenses"));
+        panel.Children.Add(P("Every voice has its own license, set by whoever trained it. Many are free for any use, but some are research-only or non-commercial. If you plan to publish or sell audio made with a voice, check its model card on Hugging Face first."));
+
+        panel.Children.Add(H("Where things live"));
+        panel.Children.Add(Code(Tilde(VoiceDir)));
+        panel.Children.Add(P("Downloaded voices."));
+        panel.Children.Add(Code(Tilde(Root)));
+        panel.Children.Add(P("Settings, the cached samples and the voice list."));
+
+        var guideClose = Btn("Close", "#2D6CDF");
+        guideClose.HorizontalAlignment = HorizontalAlignment.Left;
+        guideClose.Margin = new Thickness(0, 20, 0, 0);
+        guideClose.Click += (_, _) => guideWin?.Close();
+        panel.Children.Add(guideClose);
+
+        var win = new Window
+        {
+            Title = "Pipework Guide", Width = 640, Height = 660, Background = Brush.Parse("#121418"),
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = new ScrollViewer { Content = panel }
+        };
+        win.Closed += (_, _) => guideWin = null;
+        win.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Escape) win.Close(); };
+        guideWin = win;
+        win.Show(this);
+        return Task.CompletedTask;
     }
 
     async Task ShowSettings()

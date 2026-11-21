@@ -22,6 +22,7 @@ A small macOS app for Piper text-to-speech. Paste text, browse and download Pipe
 - Save the last audio as a WAV, or save the text in the box as a .txt
 - Collapse the voices pane to give the text box the whole window
 - Remembers your voice, speed, filter and pane state between launches
+- Built-in guide to Piper, voice names, quality tiers and voice licensing
 
 ## Settings
 
@@ -51,12 +52,11 @@ Voices are stored in `~/.local/share/piper-voices`, the same folder Piper's own 
 
 - The build number in the window is the git commit count, with a `+` when there are uncommitted changes.
 - Speed is applied at playback, so saved WAVs are always at normal speed.
-- Pause uses SIGSTOP on the player, so audio can run on for a split second after you hit it.
+- Pause stops the player and Resume picks up from just before where it stopped, with a short silent lead-in so it doesn't pop.
 - I wrap the published output in a `Pipework.app` by hand for now.
 
 ## Roadmap
 
-- Guide button explaining Piper and the voice naming scheme
 - Build script for the .app bundle
 - Windows and Linux builds, which need playback, paths and Piper discovery moved behind a small platform layer
 - Sample on another voice should stop the current one and switch
