@@ -32,10 +32,16 @@ A small macOS app for Piper text-to-speech. Paste text, browse and download Pipe
 
 Pause length differs between voices, since each one learned its own timing, so the longest option can change from voice to voice. Pause rules only change the text sent to Piper, never the text in your box.
 
+## Download
+
+Grab the latest `Pipework-vX-macOS-x64.zip` from the [Releases](https://github.com/smokeluce/pipework/releases) page, unzip it, and drag `Pipework.app` to Applications. You still need Piper installed (see below).
+
+The app is signed ad hoc rather than with an Apple Developer ID, so the first launch shows a "can't verify the developer" warning. Right-click the app and choose Open, or run `xattr -dr com.apple.quarantine /Applications/Pipework.app` once. The download is for Intel Macs. On Apple Silicon, build it yourself with `RID=osx-arm64 ./build-app.sh`.
+
 ## Requirements
 
 - macOS 12 (Monterey) or newer
-- .NET 8 SDK
+- .NET 8 SDK (only to build from source)
 - Piper, installed with `pip3 install piper-tts`
 
 Pipework looks for `piper` on your shell's PATH. If yours lives somewhere odd, set `PIPEWORK_PIPER` to the full path.
@@ -53,11 +59,10 @@ Voices are stored in `~/.local/share/piper-voices`, the same folder Piper's own 
 - The build number in the window is the git commit count, with a `+` when there are uncommitted changes.
 - Speed is applied at playback, so saved WAVs are always at normal speed.
 - Pause stops the player and Resume picks up from just before where it stopped, with a short silent lead-in so it doesn't pop.
-- I wrap the published output in a `Pipework.app` by hand for now.
+- `./build-app.sh` builds `dist/Pipework.app` and a release zip. Set `RID=osx-arm64` for Apple Silicon.
 
 ## Roadmap
 
-- Build script for the .app bundle
 - Windows and Linux builds, which need playback, paths and Piper discovery moved behind a small platform layer
 - Sample on another voice should stop the current one and switch
 
