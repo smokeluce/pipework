@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using System.Text.RegularExpressions;
@@ -87,6 +88,7 @@ public class MainWindow : Window
     bool pauseRequested;
     TaskCompletionSource<bool>? resumeTcs;
     Window? guideWin;
+    CancellationTokenSource cts = new();
 
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
     double Rate => Math.Round(speed.Value * 20) / 20;
@@ -109,7 +111,13 @@ public class MainWindow : Window
         var saveTxt = Btn("Save text…", "#2A2F3A");
 
         dl.Click += async (_, _) => await Run(async () => { var v = Selected; if (v == null) { SetStatus("Pick a voice first"); return; } await DownloadVoice(v); SetStatus("Downloaded " + v.Key); });
-        sample.Click += async (_, _) => await Run(async () => { var v = Selected; if (v == null) { SetStatus("Pick a voice first"); return; } await SpeakAndPlay(SampleText, v, true); });
+        sample.Click += async (_, _) =>
+        {
+            var v = Selected;
+            if (v == null) { SetStatus("Pick a voice first"); return; }
+            if (busy) await StopAndWait();
+            await Run(async () => await SpeakAndPlay(SampleText, v, true));
+        };
         speak.Click += async (_, _) => await Run(async () =>
         {
             var v = Selected;
@@ -118,7 +126,7 @@ public class MainWindow : Window
             await SpeakAndPlay(input.Text!, v, false);
         });
         pauseBtn.Click += (_, _) => TogglePause();
-        stop.Click += (_, _) => { stopRequested = true; Kill(piperProc); Kill(player); resumeTcs?.TrySetResult(false); };
+        stop.Click += (_, _) => { stopRequested = true; cts.Cancel(); Kill(piperProc); Kill(player); resumeTcs?.TrySetResult(false); };
         replay.Click += async (_, _) => await Run(async () =>
         {
             if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Nothing to replay yet"); return; }
@@ -201,6 +209,7 @@ public class MainWindow : Window
     {
         if (busy) return;
         busy = true;
+        cts = new CancellationTokenSource();
         try { await work(); }
         catch (Exception ex) { SetStatus(stopRequested ? "Stopped" : "Error: " + ex.Message); }
         finally { busy = false; RefreshList(); }
@@ -260,18 +269,24 @@ public class MainWindow : Window
 
     async Task DownloadFile(string url, string dest, string label)
     {
+        try { await DownloadFileCore(url, dest, label); }
+        catch (OperationCanceledException) { TryDelete(dest + ".part"); throw; }
+    }
+
+    async Task DownloadFileCore(string url, string dest, string label)
+    {
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
         var tmp = dest + ".part";
-        using var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        using var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token);
         resp.EnsureSuccessStatusCode();
         var total = resp.Content.Headers.ContentLength ?? 0;
-        await using var s = await resp.Content.ReadAsStreamAsync();
+        await using var s = await resp.Content.ReadAsStreamAsync(cts.Token);
         await using (var f = File.Create(tmp))
         {
             var buf = new byte[81920]; long read = 0; int n; var last = DateTime.MinValue;
-            while ((n = await s.ReadAsync(buf)) > 0)
+            while ((n = await s.ReadAsync(buf, cts.Token)) > 0)
             {
-                await f.WriteAsync(buf.AsMemory(0, n));
+                await f.WriteAsync(buf.AsMemory(0, n), cts.Token);
                 read += n;
                 if (total > 0 && (DateTime.Now - last).TotalMilliseconds > 150) { last = DateTime.Now; SetStatus($"{label} {read * 100 / total}%"); }
             }
@@ -371,6 +386,15 @@ public class MainWindow : Window
             ? "Sample from cache  ·  " + info
             : "Synthesized " + words + (words == 1 ? " word" : " words") + " in " + lastSynthTime.Value.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + "s  ·  " + info;
         await Play(raw, v.Key);
+    }
+
+    async Task StopAndWait()
+    {
+        stopRequested = true;
+        cts.Cancel();
+        Kill(piperProc); Kill(player);
+        resumeTcs?.TrySetResult(false);
+        for (int i = 0; i < 100 && busy; i++) await Task.Delay(50);
     }
 
     async Task Play(string raw, string label)
