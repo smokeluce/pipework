@@ -23,6 +23,8 @@ A small macOS app for Piper text-to-speech. Paste text, browse and download Pipe
 - Collapse the voices pane to give the text box the whole window
 - Remembers your voice, speed, filter and pane state between launches
 - Built-in guide to Piper, voice names, quality tiers and voice licensing
+- Speaker picker for multi-speaker voices like libritts, with a cached sample per speaker
+- Favorites for voices and individual speakers, a favorites-only filter, and a Random pick from your downloaded voices
 
 ## Settings
 

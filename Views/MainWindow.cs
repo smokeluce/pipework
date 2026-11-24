@@ -27,6 +27,8 @@ public class VoiceInfo
     public string LangName = "";
     public string Quality = "";
     public long Size;
+    public int NumSpeakers = 1;
+    public List<(string Name, int Id)> Speakers = new();
     public List<string> Files = new();
     public string Search => (Key + " " + LangName).ToLowerInvariant();
     public string OnnxName => Files.Where(f => f.EndsWith(".onnx")).Select(Path.GetFileName).FirstOrDefault() ?? "";
@@ -46,6 +48,9 @@ class PipeworkSettings
     public bool PaneHidden { get; set; }
     public string? DashMode { get; set; }
     public List<PauseRule>? Rules { get; set; }
+    public Dictionary<string, int>? Speakers { get; set; }
+    public List<string>? Favorites { get; set; }
+    public bool FavOnly { get; set; }
 }
 
 public class MainWindow : Window
@@ -89,6 +94,14 @@ public class MainWindow : Window
     TaskCompletionSource<bool>? resumeTcs;
     Window? guideWin;
     CancellationTokenSource cts = new();
+    Dictionary<string, int> speakerFor = new();
+    readonly ComboBox speakerBox = new() { MinWidth = 120 };
+    Grid? speakerRow;
+    string? speakerBoxVoice;
+    bool updatingSpeaker;
+    HashSet<string> favs = new();
+    readonly CheckBox favOnlyBox = new() { Content = "★ only", Foreground = Brush.Parse("#C9CED6"), FontSize = 12 };
+    readonly Button favBtn = new() { Content = "☆", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(14, 9), FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 0, 8, 6) };
 
     VoiceInfo? Selected => list.SelectedIndex >= 0 && list.SelectedIndex < shown.Count ? shown[list.SelectedIndex] : null;
     double Rate => Math.Round(speed.Value * 20) / 20;
@@ -148,11 +161,40 @@ public class MainWindow : Window
         head.Children.Add(new TextBlock { Text = "Filter by language, name or quality", Foreground = Brush.Parse("#8B93A1"), FontSize = 12 });
         head.Children.Add(search);
         head.Children.Add(count);
+        head.Children.Add(favOnlyBox);
         DockPanel.SetDock(head, Dock.Top);
-        var lb = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
-        lb.Children.Add(dl); lb.Children.Add(sample);
+        var lb = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
+        var rndBtn = Btn("", "#2A2F3A");
+        rndBtn.Padding = new Thickness(14, 9);
+        rndBtn.Content = new Avalonia.Controls.Shapes.Path
+        {
+            Data = Geometry.Parse("M3,7 L8,7 C12,7 12,17 16,17 L20,17 M17,14 L20,17 L17,20 M3,17 L8,17 C12,17 12,7 16,7 L20,7 M17,4 L20,7 L17,10"),
+            Stroke = Brushes.White, StrokeThickness = 2,
+            StrokeLineCap = PenLineCap.Round, StrokeJoin = PenLineJoin.Round,
+            Width = 18, Height = 18, Stretch = Stretch.Uniform
+        };
+        ToolTip.SetTip(rndBtn, "Random pick from your downloaded voices");
+        ToolTip.SetTip(favBtn, "Favorite this voice, or the selected speaker");
+        rndBtn.Click += (_, _) => PickRandom();
+        favBtn.Click += (_, _) => ToggleFav();
+        favOnlyBox.PropertyChanged += (_, e) => { if (e.Property == ToggleButton.IsCheckedProperty) { RefreshList(); UpdateSpeakerUi(true); SaveSettings(); } };
+        list.SelectionChanged += (_, _) => UpdateFavButton();
+        lb.Children.Add(dl); lb.Children.Add(sample); lb.Children.Add(favBtn); lb.Children.Add(rndBtn);
         DockPanel.SetDock(lb, Dock.Bottom);
-        left.Children.Add(head); left.Children.Add(lb); left.Children.Add(list);
+        var spLabel = new TextBlock { Text = "Speaker", Foreground = Brush.Parse("#8B93A1"), FontSize = 12, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+        speakerBox.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var spPrev = new Button { Content = "‹", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(12, 4), Margin = new Thickness(6, 0, 0, 0) };
+        var spNext = new Button { Content = "›", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(12, 4), Margin = new Thickness(6, 0, 0, 0) };
+        spPrev.Click += (_, _) => StepSpeaker(-1);
+        spNext.Click += (_, _) => StepSpeaker(1);
+        speakerBox.SelectionChanged += (_, _) => OnSpeakerPicked();
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), Margin = new Thickness(0, 10, 0, 0), IsVisible = false };
+        Grid.SetColumn(speakerBox, 1); Grid.SetColumn(spPrev, 2); Grid.SetColumn(spNext, 3);
+        row.Children.Add(spLabel); row.Children.Add(speakerBox); row.Children.Add(spPrev); row.Children.Add(spNext);
+        DockPanel.SetDock(row, Dock.Bottom);
+        speakerRow = row;
+        left.Children.Add(head); left.Children.Add(lb); left.Children.Add(row); left.Children.Add(list);
+        list.SelectionChanged += (_, _) => UpdateSpeakerUi();
 
         var right = new DockPanel();
         var title = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
@@ -231,7 +273,8 @@ public class MainWindow : Window
         var terms = (search.Text ?? "").ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var sel = Selected?.Key ?? wantVoice;
         shown = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
-        list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "↓  ") + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
+        if (favOnlyBox.IsChecked == true) shown = shown.Where(v => FavCount(v) > 0).ToList();
+        list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "↓  ") + FavMark(v) + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
         list.SelectedIndex = sel == null ? -1 : shown.FindIndex(v => v.Key == sel);
         if (all.Count > 0) wantVoice = null;
         count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed  ·  ↓ = download";
@@ -261,6 +304,11 @@ public class MainWindow : Window
                 v.Files.Add(f.Name);
                 if (f.Name.EndsWith(".onnx")) v.Size = f.Value.GetProperty("size_bytes").GetInt64();
             }
+            if (e.TryGetProperty("num_speakers", out var nsEl) && nsEl.TryGetInt32(out var nsVal)) v.NumSpeakers = nsVal;
+            if (e.TryGetProperty("speaker_id_map", out var smEl) && smEl.ValueKind == JsonValueKind.Object)
+                foreach (var sp in smEl.EnumerateObject()) if (sp.Value.TryGetInt32(out var spId)) v.Speakers.Add((sp.Name, spId));
+            v.Speakers = v.Speakers.OrderBy(x => x.Id).ToList();
+            if (v.NumSpeakers > 1 && v.Speakers.Count == 0) for (int i = 0; i < v.NumSpeakers; i++) v.Speakers.Add(("speaker " + i, i));
             all.Add(v);
         }
         all = all.OrderBy(v => v.Key).ToList();
@@ -330,7 +378,7 @@ public class MainWindow : Window
     {
         stopRequested = false;
         lastSynthTime = null;
-        var raw = cache ? Path.Combine(SampleDir, v.Key + ".wav") : Path.Combine(Path.GetTempPath(), "pipework-" + DateTime.Now.ToString("HHmmssfff") + ".wav");
+        var raw = cache ? Path.Combine(SampleDir, v.Key + SpeakerSuffix(v) + ".wav") : Path.Combine(Path.GetTempPath(), "pipework-" + DateTime.Now.ToString("HHmmssfff") + ".wav");
         Directory.CreateDirectory(Path.GetDirectoryName(raw)!);
         if (cache && File.Exists(raw)) return raw;
 
@@ -353,6 +401,7 @@ public class MainWindow : Window
             };
             psi.ArgumentList.Add("--model"); psi.ArgumentList.Add(Path.Combine(VoiceDir, v.OnnxName));
             psi.ArgumentList.Add("--output_file"); psi.ArgumentList.Add(raw);
+            if (v.NumSpeakers > 1) { psi.ArgumentList.Add("--speaker"); psi.ArgumentList.Add(CurrentSpeaker(v).ToString()); }
             using var p = Process.Start(psi)!;
             piperProc = p;
             var errTask = p.StandardError.ReadToEndAsync();
@@ -378,14 +427,108 @@ public class MainWindow : Window
         var raw = await Synthesize(text, v, cache);
         if (raw == null) return;
         var prev = lastRaw;
-        lastRaw = raw; lastLabel = v.Key;
+        lastRaw = raw; lastLabel = LabelFor(v);
         if (prev != null && prev != raw && prev.StartsWith(Path.GetTempPath())) TryDelete(prev);
         var words = Regex.Matches(text, @"\S+").Count;
         var info = ClipInfo(raw);
         doneNote = lastSynthTime == null
             ? "Sample from cache  ·  " + info
             : "Synthesized " + words + (words == 1 ? " word" : " words") + " in " + lastSynthTime.Value.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + "s  ·  " + info;
-        await Play(raw, v.Key);
+        await Play(raw, LabelFor(v));
+    }
+
+    int CurrentSpeaker(VoiceInfo v) => v.NumSpeakers > 1 && speakerFor.TryGetValue(v.Key, out var id) ? id : 0;
+    string SpeakerSuffix(VoiceInfo v) => v.NumSpeakers > 1 ? "-s" + CurrentSpeaker(v) : "";
+    string SpeakerName(VoiceInfo v) { var id = CurrentSpeaker(v); var m = v.Speakers.FirstOrDefault(x => x.Id == id); return m.Name ?? id.ToString(); }
+    string LabelFor(VoiceInfo v) => v.NumSpeakers > 1 ? v.Key + " · speaker " + SpeakerName(v) : v.Key;
+
+    string FavKeyFor(VoiceInfo v) => v.NumSpeakers > 1 ? v.Key + "|" + SpeakerName(v) : v.Key;
+    bool IsFav(VoiceInfo v) => favs.Contains(FavKeyFor(v));
+    int FavCount(VoiceInfo v) => v.NumSpeakers > 1 ? v.Speakers.Count(sp => favs.Contains(v.Key + "|" + sp.Name)) : (favs.Contains(v.Key) ? 1 : 0);
+    string FavMark(VoiceInfo v) { var n = FavCount(v); return n == 0 ? "" : (v.NumSpeakers > 1 ? "★" + n + " " : "★ "); }
+
+    List<(string Name, int Id)> ShownSpeakers(VoiceInfo v)
+    {
+        if (favOnlyBox.IsChecked == true && FavCount(v) > 0) return v.Speakers.Where(sp => favs.Contains(v.Key + "|" + sp.Name)).ToList();
+        return v.Speakers;
+    }
+
+    void UpdateFavButton()
+    {
+        var v = Selected;
+        favBtn.Content = v != null && IsFav(v) ? "★" : "☆";
+    }
+
+    void ToggleFav()
+    {
+        var v = Selected;
+        if (v == null) { SetStatus("Pick a voice first"); return; }
+        var k = FavKeyFor(v);
+        bool added = !favs.Remove(k);
+        if (added) favs.Add(k);
+        SetStatus((added ? "★ Added " : "☆ Removed ") + LabelFor(v));
+        SaveSettings();
+        RefreshList();
+        UpdateSpeakerUi(true);
+        UpdateFavButton();
+    }
+
+    void PickRandom()
+    {
+        var pool = shown.Where(Installed).ToList();
+        if (pool.Count == 0) { SetStatus("No downloaded voices match the current list"); return; }
+        var v = pool[Random.Shared.Next(pool.Count)];
+        if (v.NumSpeakers > 1)
+        {
+            var sl = ShownSpeakers(v);
+            if (sl.Count > 0) speakerFor[v.Key] = sl[Random.Shared.Next(sl.Count)].Id;
+        }
+        var idx = shown.IndexOf(v);
+        list.SelectedIndex = idx;
+        list.ScrollIntoView(idx);
+        UpdateSpeakerUi(true);
+        UpdateFavButton();
+        SaveSettings();
+        SetStatus("Random pick: " + LabelFor(v) + ". Hit Sample to hear it.");
+    }
+
+    void UpdateSpeakerUi(bool force = false)
+    {
+        if (speakerRow == null) return;
+        var v = Selected;
+        if (v == null || v.NumSpeakers <= 1) { speakerRow.IsVisible = false; speakerBoxVoice = null; return; }
+        speakerRow.IsVisible = true;
+        if (speakerBoxVoice == v.Key && !force) return;
+        var sl = ShownSpeakers(v);
+        updatingSpeaker = true;
+        speakerBox.ItemsSource = sl.Select(x => (favs.Contains(v.Key + "|" + x.Name) ? "★ " : "") + (x.Name.StartsWith("speaker ") ? x.Name : x.Id + " · " + x.Name)).ToList();
+        var idx = sl.FindIndex(x => x.Id == CurrentSpeaker(v));
+        if (idx < 0 && sl.Count > 0) { idx = 0; speakerFor[v.Key] = sl[0].Id; }
+        speakerBox.SelectedIndex = Math.Max(0, idx);
+        speakerBoxVoice = v.Key;
+        updatingSpeaker = false;
+    }
+
+    void OnSpeakerPicked()
+    {
+        if (updatingSpeaker) return;
+        var v = Selected;
+        if (v == null || v.NumSpeakers <= 1 || speakerBoxVoice != v.Key) return;
+        var sl = ShownSpeakers(v);
+        var i = speakerBox.SelectedIndex;
+        if (i < 0 || i >= sl.Count) return;
+        speakerFor[v.Key] = sl[i].Id;
+        UpdateFavButton();
+        SaveSettings();
+    }
+
+    void StepSpeaker(int d)
+    {
+        var v = Selected;
+        if (v == null || v.NumSpeakers <= 1) return;
+        var n = ShownSpeakers(v).Count;
+        if (n == 0) return;
+        speakerBox.SelectedIndex = ((speakerBox.SelectedIndex + d) % n + n) % n;
     }
 
     async Task StopAndWait()
@@ -466,7 +609,7 @@ public class MainWindow : Window
         if (lastRaw == null || !File.Exists(lastRaw)) { SetStatus("Speak or sample something first, then save it"); return; }
         var f = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
         {
-            Title = "Save audio", SuggestedFileName = (lastLabel ?? "pipework") + ".wav", DefaultExtension = "wav",
+            Title = "Save audio", SuggestedFileName = Regex.Replace(lastLabel ?? "pipework", @"[^\w\-]+", "-") + ".wav", DefaultExtension = "wav",
             FileTypeChoices = new[] { new FilePickerFileType("WAV audio") { Patterns = new[] { "*.wav" } } }
         });
         if (f == null) return;
@@ -537,12 +680,13 @@ public class MainWindow : Window
         panel.Children.Add(P("Higher is not always better for a given voice, so use Sample to compare before committing to a long passage."));
 
         panel.Children.Add(H("Multi-speaker voices"));
-        panel.Children.Add(P("Some voices, the libritts ones for example, are multi-speaker models that hold many different people in one file. Pipework uses the model's default speaker for now, so you hear one voice from it. A speaker picker is on the wishlist."));
+        panel.Children.Add(P("Some voices, the libritts ones for example, hold many different speakers in one model. When you select one, a Speaker row appears under the voice list. Use the arrows to step through speakers and hit Sample to audition each one. Pipework remembers your choice for each voice."));
 
         panel.Children.Add(H("Using the app"));
         panel.Children.Add(P("The ● mark in the voice list means a voice is downloaded. The ↓ mark means it is available to download."));
         panel.Children.Add(P("Sample plays a short test line and keeps it, so repeat samples are instant. The first synthesis with a voice takes a moment while the model loads."));
         panel.Children.Add(P("Speed only changes playback, so saved WAV files are always at normal speed."));
+        panel.Children.Add(P("The ☆ button marks a favorite: a whole voice, or on a multi-speaker voice the speaker you have selected. Tick ★ only to show just your favorites. Random picks a downloaded voice from the current list, and a random speaker if it has several. Then hit Sample to hear it."));
         panel.Children.Add(P("In Settings, text like -- between words becomes a pause, and you can add your own pause rules. Pause length differs between voices, since each one learned its own timing."));
 
         panel.Children.Add(H("Voice licenses"));
@@ -738,6 +882,9 @@ public class MainWindow : Window
                     SetPane(st.PaneHidden);
                     dashMode = st.DashMode ?? "comma";
                     pauseRules = st.Rules ?? new List<PauseRule>();
+                    speakerFor = st.Speakers ?? new Dictionary<string, int>();
+                    favs = new HashSet<string>(st.Favorites ?? new List<string>());
+                    favOnlyBox.IsChecked = st.FavOnly;
                 }
             }
         }
@@ -751,7 +898,7 @@ public class MainWindow : Window
         try
         {
             Directory.CreateDirectory(Root);
-            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden, DashMode = dashMode, Rules = pauseRules };
+            var st = new PipeworkSettings { Voice = lastVoice, Speed = Rate, Filter = search.Text, PaneHidden = paneHidden, DashMode = dashMode, Rules = pauseRules, Speakers = speakerFor, Favorites = favs.OrderBy(x => x).ToList(), FavOnly = favOnlyBox.IsChecked == true };
             File.WriteAllText(SettingsFile, JsonSerializer.Serialize(st));
         }
         catch { }
