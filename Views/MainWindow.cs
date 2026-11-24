@@ -55,7 +55,7 @@ class PipeworkSettings
 
 public class MainWindow : Window
 {
-    const string AppVersion = "0.2";
+    const string AppVersion = "0.3";
     static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(30) };
     static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     static readonly string Root = Path.Combine(Home, "Library/Application Support/Pipework");
