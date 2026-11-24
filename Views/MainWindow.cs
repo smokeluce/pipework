@@ -100,6 +100,7 @@ public class MainWindow : Window
     string? speakerBoxVoice;
     bool updatingSpeaker;
     HashSet<string> favs = new();
+    List<int> shownSpk = new();
     readonly CheckBox favOnlyBox = new() { Content = "★ only", Foreground = Brush.Parse("#C9CED6"), FontSize = 12 };
     readonly Button favBtn = new() { Content = "☆", Background = Brush.Parse("#2A2F3A"), Foreground = Brushes.White, CornerRadius = new CornerRadius(8), Padding = new Thickness(14, 9), FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 0, 8, 6) };
 
@@ -268,14 +269,46 @@ public class MainWindow : Window
 
     static bool Installed(VoiceInfo v) => v.OnnxName != "" && File.Exists(Path.Combine(VoiceDir, v.OnnxName)) && File.Exists(Path.Combine(VoiceDir, v.OnnxName + ".json"));
 
+    string RowText(VoiceInfo v, int spk)
+    {
+        var inst = Installed(v) ? "●  " : "↓  ";
+        var size = "   " + (v.Size / 1048576) + " MB";
+        if (spk >= 0)
+        {
+            var nm = v.Speakers.FirstOrDefault(x => x.Id == spk).Name ?? spk.ToString();
+            return inst + "★ " + v.Key + " · " + nm + size;
+        }
+        return inst + FavMark(v) + v.Key + size;
+    }
+
     void RefreshList()
     {
         var terms = (search.Text ?? "").ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var sel = Selected?.Key ?? wantVoice;
-        shown = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
-        if (favOnlyBox.IsChecked == true) shown = shown.Where(v => FavCount(v) > 0).ToList();
-        list.ItemsSource = shown.Select(v => (Installed(v) ? "●  " : "↓  ") + FavMark(v) + v.Key + "   " + (v.Size / 1048576) + " MB").ToList();
-        list.SelectedIndex = sel == null ? -1 : shown.FindIndex(v => v.Key == sel);
+        var cur = Selected;
+        var selKey = cur?.Key ?? wantVoice;
+        int selSpk = cur != null && cur.NumSpeakers > 1 ? CurrentSpeaker(cur) : -1;
+        var voices = all.Where(v => terms.All(t => v.Search.Contains(t))).ToList();
+        shown = new List<VoiceInfo>();
+        shownSpk = new List<int>();
+        bool favMode = favOnlyBox.IsChecked == true;
+        foreach (var v in voices)
+        {
+            if (!favMode) { shown.Add(v); shownSpk.Add(-1); }
+            else if (v.NumSpeakers > 1)
+            {
+                foreach (var sp in v.Speakers.Where(sp => favs.Contains(v.Key + "|" + sp.Name))) { shown.Add(v); shownSpk.Add(sp.Id); }
+            }
+            else if (favs.Contains(v.Key)) { shown.Add(v); shownSpk.Add(-1); }
+        }
+        list.ItemsSource = Enumerable.Range(0, shown.Count).Select(i => RowText(shown[i], shownSpk[i])).ToList();
+        int idx = -1;
+        if (selKey != null)
+        {
+            for (int i = 0; i < shown.Count; i++)
+                if (shown[i].Key == selKey && (shownSpk[i] < 0 || shownSpk[i] == selSpk)) { idx = i; break; }
+            if (idx < 0) idx = shown.FindIndex(v => v.Key == selKey);
+        }
+        list.SelectedIndex = idx;
         if (all.Count > 0) wantVoice = null;
         count.Text = $"{shown.Count} shown  ·  {all.Count(Installed)} installed  ·  ● = installed  ·  ↓ = download";
     }
@@ -447,11 +480,7 @@ public class MainWindow : Window
     int FavCount(VoiceInfo v) => v.NumSpeakers > 1 ? v.Speakers.Count(sp => favs.Contains(v.Key + "|" + sp.Name)) : (favs.Contains(v.Key) ? 1 : 0);
     string FavMark(VoiceInfo v) { var n = FavCount(v); return n == 0 ? "" : (v.NumSpeakers > 1 ? "★" + n + " " : "★ "); }
 
-    List<(string Name, int Id)> ShownSpeakers(VoiceInfo v)
-    {
-        if (favOnlyBox.IsChecked == true && FavCount(v) > 0) return v.Speakers.Where(sp => favs.Contains(v.Key + "|" + sp.Name)).ToList();
-        return v.Speakers;
-    }
+    List<(string Name, int Id)> ShownSpeakers(VoiceInfo v) => v.Speakers;
 
     void UpdateFavButton()
     {
@@ -475,19 +504,18 @@ public class MainWindow : Window
 
     void PickRandom()
     {
-        var pool = shown.Where(Installed).ToList();
-        if (pool.Count == 0) { SetStatus("No downloaded voices match the current list"); return; }
-        var v = pool[Random.Shared.Next(pool.Count)];
+        var rows = Enumerable.Range(0, shown.Count).Where(i => Installed(shown[i])).ToList();
+        if (rows.Count == 0) { SetStatus("No downloaded voices match the current list"); return; }
+        var i = rows[Random.Shared.Next(rows.Count)];
+        var v = shown[i];
         if (v.NumSpeakers > 1)
         {
-            var sl = ShownSpeakers(v);
-            if (sl.Count > 0) speakerFor[v.Key] = sl[Random.Shared.Next(sl.Count)].Id;
+            if (shownSpk[i] >= 0) speakerFor[v.Key] = shownSpk[i];
+            else if (v.Speakers.Count > 0) speakerFor[v.Key] = v.Speakers[Random.Shared.Next(v.Speakers.Count)].Id;
         }
-        var idx = shown.IndexOf(v);
-        list.SelectedIndex = idx;
-        list.ScrollIntoView(idx);
+        list.SelectedIndex = i;
+        list.ScrollIntoView(i);
         UpdateSpeakerUi(true);
-        UpdateFavButton();
         SaveSettings();
         SetStatus("Random pick: " + LabelFor(v) + ". Hit Sample to hear it.");
     }
@@ -496,17 +524,25 @@ public class MainWindow : Window
     {
         if (speakerRow == null) return;
         var v = Selected;
-        if (v == null || v.NumSpeakers <= 1) { speakerRow.IsVisible = false; speakerBoxVoice = null; return; }
+        if (v == null || v.NumSpeakers <= 1) { speakerRow.IsVisible = false; speakerBoxVoice = null; UpdateFavButton(); return; }
+        int row = list.SelectedIndex;
+        if (row >= 0 && row < shownSpk.Count && shownSpk[row] >= 0 && CurrentSpeaker(v) != shownSpk[row])
+        {
+            speakerFor[v.Key] = shownSpk[row];
+            force = true;
+            SaveSettings();
+        }
         speakerRow.IsVisible = true;
-        if (speakerBoxVoice == v.Key && !force) return;
-        var sl = ShownSpeakers(v);
-        updatingSpeaker = true;
-        speakerBox.ItemsSource = sl.Select(x => (favs.Contains(v.Key + "|" + x.Name) ? "★ " : "") + (x.Name.StartsWith("speaker ") ? x.Name : x.Id + " · " + x.Name)).ToList();
-        var idx = sl.FindIndex(x => x.Id == CurrentSpeaker(v));
-        if (idx < 0 && sl.Count > 0) { idx = 0; speakerFor[v.Key] = sl[0].Id; }
-        speakerBox.SelectedIndex = Math.Max(0, idx);
-        speakerBoxVoice = v.Key;
-        updatingSpeaker = false;
+        if (speakerBoxVoice != v.Key || force)
+        {
+            var sl = v.Speakers;
+            updatingSpeaker = true;
+            speakerBox.ItemsSource = sl.Select(x => (favs.Contains(v.Key + "|" + x.Name) ? "★ " : "") + (x.Name.StartsWith("speaker ") ? x.Name : x.Id + " · " + x.Name)).ToList();
+            speakerBox.SelectedIndex = Math.Max(0, sl.FindIndex(x => x.Id == CurrentSpeaker(v)));
+            speakerBoxVoice = v.Key;
+            updatingSpeaker = false;
+        }
+        UpdateFavButton();
     }
 
     void OnSpeakerPicked()
